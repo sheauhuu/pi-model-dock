@@ -1,9 +1,14 @@
 import { BUILTIN_COLLISION_WARNING, BUILTIN_PROVIDER_IDS, loadModelsConfig } from "../config.ts";
-import { describeProbeInfo, resolveModelInfo } from "model-probe";
+import { describeCapabilities, supportedThinkingLevels } from "../capabilities.ts";
+import { resolveModelMetadata } from "../model-catalog.ts";
+import { applyModelCapabilities, contextPresets, effectiveModelInfo, manualThinkingMap } from "../model-settings.ts";
+import { modelOptionsFromProbe } from "../model-entry.ts";
 import { REASONING_LEVELS } from "../types.ts";
-import type { ApiKeyMode, CommandContext, ModelOptions, ProviderApi, ProviderStyle, ReasoningCeiling, SelectItem } from "../types.ts";
-import { normalizeEndpoint, slugify, suggestProviderId } from "../url.ts";
-import { selectOne } from "./select.ts";
+import type { ApiKeyMode, CommandContext, ModelOptions, ModelPreferences, ModelProbeInfo, ProviderApi, ProviderIdentity, ProviderStyle, ThinkingLevel, SelectItem } from "../types.ts";
+import { providerIdentity } from "../provider-name.ts";
+import { normalizeEndpoint, suggestProviderId } from "../url.ts";
+import { modelDisplayName, modelLabel } from "../model-name.ts";
+import { pickMany, selectOne } from "./select.ts";
 
 export async function promptApiKey(
 	ctx: CommandContext,
@@ -22,34 +27,69 @@ export async function promptApiKey(
 	return { mode: "literal", value: trimmed };
 }
 
-function reasoningLabel(level: ReasoningCeiling): string {
-	if (level === "off") return "Off - no reasoning";
-	if (level === "xhigh") return "xhigh - maximum (only if the model supports it)";
-	if (level === "max") return "max - maximum (only if the model supports it)";
-	return `${level} - cap reasoning at ${level}`;
+export type SupportedThinkingChoice = { mode: "auto" } | { mode: "manual"; map: Record<string, string | null> };
+
+export async function promptSupportedThinkingLevels(ctx: CommandContext, metadata: ModelProbeInfo, preferences: ModelPreferences = {}): Promise<SupportedThinkingChoice | null> {
+	const effective = effectiveModelInfo(metadata, preferences);
+	const current = supportedThinkingLevels(effective);
+	const mode = await selectOne(ctx, "Supported thinking levels", [
+		{ value: "auto", label: "Auto", description: `Detected: ${supportedThinkingLevels(metadata)?.join(" / ") ?? "unknown"} [${metadata.sources?.thinkingLevelMap ?? metadata.sources?.reasoning ?? "unknown"}]` },
+		{ value: "manual", label: "Manual • select supported levels", description: "Declare the levels your model supports; kept on refresh (not a live test)" },
+	]);
+	if (!mode) return null;
+	if (mode === "auto") return { mode: "auto" };
+	const labels: Record<ThinkingLevel, string> = { off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
+	const selected = await pickMany(ctx, "Supported thinking levels • manual declaration", REASONING_LEVELS.map(level => ({ value: level, label: labels[level] })), { initialValues: current ?? [], itemLabel: "thinking level" });
+	if (selected === null) return null;
+	return { mode: "manual", map: manualThinkingMap(selected, effective) };
 }
 
-// Prompts for a reasoning ceiling. Returns null if cancelled.
-export async function promptReasoning(ctx: CommandContext, current?: ReasoningCeiling): Promise<ReasoningCeiling | null> {
-	const items: SelectItem[] = REASONING_LEVELS.map((level) => ({
-		value: level,
-		label: reasoningLabel(level),
-	}));
-	const initialIndex = current ? REASONING_LEVELS.indexOf(current) : 0;
-	const choice = await selectOne(ctx, "Reasoning", items, { initialIndex: Math.max(0, initialIndex) });
-	return (choice as ReasoningCeiling | null) ?? null;
+export type ModelNameChoice = { mode: "auto" } | { mode: "manual"; value: string | null };
+
+export async function promptModelName(ctx: CommandContext, id: string, current: string, metadata: ModelProbeInfo): Promise<ModelNameChoice | null> {
+	const mode = await selectOne(ctx, "Model display name", [
+		{ value: "auto", label: `Auto • ${metadata.name ?? id}`, description: metadata.sources?.name ?? "No display name found; use the exact model id" },
+		{ value: "custom", label: "Custom…", description: "Preserve your spelling; leave the API model id unchanged" },
+		{ value: "id", label: `Use model id • ${id}`, description: "Keep displaying the id on refresh" },
+	]);
+	if (!mode) return null;
+	if (mode === "auto") return { mode: "auto" };
+	if (mode === "id") return { mode: "manual", value: null };
+	const value = await ctx.ui.input("Model display name", `current: ${current} (blank = use model id)`);
+	if (value === undefined) return null;
+	return { mode: "manual", value: value.trim() && value.trim() !== id ? value.trim() : null };
 }
 
-// When a model is capped at xhigh or max, some providers name that level
-// differently (e.g. "max"). Offer an optional override for the provider-facing string.
-export async function promptCeilingProviderString(ctx: CommandContext, level: "xhigh" | "max", current?: string): Promise<string | undefined> {
-	const value = await ctx.ui.input(
-		`${level} provider value (blank = ${level})`,
-		current && current !== level ? `current: ${current}` : `e.g. max (leave blank to send "${level}")`,
-	);
-	if (value === undefined) return undefined;
-	const trimmed = value.trim();
-	return trimmed || undefined;
+export async function promptImageChoice(ctx: CommandContext, metadata: ModelProbeInfo) {
+	const choice = await selectOne(ctx, "Image input", [
+		{ value: "auto", label: `Auto • ${metadata.image === undefined ? "unknown (text only until known)" : metadata.image ? "on" : "off"}`, description: metadata.sources?.image },
+		{ value: "yes", label: "On • manual", description: "Keep image input enabled on refresh" },
+		{ value: "no", label: "Off • manual", description: "Keep text-only input on refresh" },
+	]);
+	return choice as "auto" | "yes" | "no" | null;
+}
+
+export type ContextChoice = { mode: "auto" } | { mode: "manual"; value: number | null };
+
+export async function promptContextChoice(ctx: CommandContext, current?: number, metadata?: ModelProbeInfo): Promise<ContextChoice | null> {
+	const format = (value: number) => value >= 1_000_000 && value % 1000 === 0 ? `${value / 1_000_000}M` : value % 1000 === 0 ? `${value / 1000}K` : String(value);
+	const presets = contextPresets(metadata, current);
+	for (const value of [128000, 272000, 1000000]) {
+		if (!presets.some(preset => preset.value === value)) presets.push({ value, sources: ["usage limit preset"] });
+	}
+	const limit = metadata?.sources?.contextWindow === "gateway" ? metadata.contextWindow : undefined;
+	const items: SelectItem[] = [
+		{ value: "auto", label: `Auto • ${metadata?.contextWindow ? format(metadata.contextWindow) : "unknown"}`, description: metadata?.sources?.contextWindow ?? "Use Pi defaults until metadata is available" },
+		...presets.filter(preset => !limit || preset.value <= limit).map(preset => ({ value: String(preset.value), label: `${format(preset.value)} (${preset.value} tokens)`, description: `${preset.sources.join(" / ")} • keep this limit on refresh` })),
+		{ value: "custom", label: "Custom…", description: "Enter a token limit" },
+	];
+	const choice = await selectOne(ctx, "Context window", items);
+	if (!choice) return null;
+	if (choice === "auto") return { mode: "auto" };
+	const value = choice === "custom" ? await promptContextWindow(ctx, current) : Number(choice);
+	if (value === null) return null;
+	if (limit && value > limit) { ctx.ui.notify(`The gateway declares a maximum of ${limit} tokens. Choose a limit at or below it.`, "warning"); return null; }
+	return { mode: "manual", value: value === 0 ? null : value };
 }
 
 export async function promptImage(ctx: CommandContext, current?: boolean): Promise<boolean | null> {
@@ -73,8 +113,8 @@ export async function promptContextWindow(ctx: CommandContext, current?: number)
 	if (value === undefined) return null;
 	const trimmed = value.trim();
 	if (!trimmed) return null;
-	const parsed = Number.parseInt(trimmed.replace(/[_,]/g, ""), 10);
-	if (!Number.isFinite(parsed) || parsed < 0) {
+	const parsed = Number(trimmed.replace(/[_,]/g, ""));
+	if (!Number.isSafeInteger(parsed) || parsed < 0) {
 		ctx.ui.notify("Enter a whole number of tokens (0 to clear).", "warning");
 		return null;
 	}
@@ -102,7 +142,7 @@ export async function promptMaxTokens(ctx: CommandContext, current?: number): Pr
 // Manual model entry: type an id, land in that model's metadata menu (each
 // field opens its own prompt and returns to the menu), then the next id.
 // Blank enter or esc on the id prompt exits. Starting values come from
-// resolveModelInfo (local rules + defaults — manual ids have no probe data).
+// reference catalogs/rules; manual ids have no gateway probe data.
 // Returns the ids plus every model's confirmed options; null when cancelled
 // with nothing entered.
 export async function promptManualModels(
@@ -138,38 +178,49 @@ export async function promptManualModels(
 					: style === "openai-responses"
 						? "openai-responses"
 						: "openai-completions";
-		const resolved = resolveModelInfo(id, undefined, undefined, api);
-		const opts: ModelOptions = {
-			reasoning: resolved.reasoning === false ? "off" : "xhigh",
-			image: resolved.image ?? false,
-			// Unknown models get a 256K starting point instead of staying unset.
-			contextWindow: resolved.contextWindow ?? 262144,
-			maxTokens: resolved.maxTokens,
-		};
-		const summary = describeProbeInfo(resolved);
+		const resolved = await resolveModelMetadata(ctx, id, {}, api);
+		const opts: ModelOptions = { ...modelOptionsFromProbe(resolved), preferences: {} };
+		const summary = describeCapabilities(resolved);
 
 		// Per-model menu: each field opens its own prompt, then comes back here.
 		while (true) {
-			const field = await selectOne(ctx, summary ? `${id} — ${summary}` : id, [
-				{ value: "reasoning", label: "Reasoning", suffix: ` • ${opts.reasoning}`, description: "Set the reasoning ceiling (off → max)" },
-				{ value: "image", label: "Image input", suffix: ` • ${opts.image ? "on" : "off"}`, description: "Toggle image input (text+image vs text-only)" },
+			const effective = effectiveModelInfo(resolved, opts.preferences!);
+			const field = await selectOne(ctx, summary ? `${modelLabel(id, opts)} — ${summary}` : modelLabel(id, opts), [
+				{ value: "name", label: "Display name", suffix: ` • ${modelDisplayName(id, opts)}`, description: "Edit the display name; keep the exact API model id" },
+				{ value: "thinking-levels", label: "Supported thinking levels", suffix: ` • ${supportedThinkingLevels(effective)?.join(" / ") ?? "unknown"}`, description: `${effective.sources?.thinkingLevelMap ?? effective.sources?.reasoning ?? "unknown"} • Auto or manual checkboxes` },
+				{ value: "image", label: "Image input", suffix: ` • ${resolved.image === undefined && opts.preferences!.image === undefined ? "unknown" : opts.image ? "on" : "off"}`, description: `Capability source: ${resolved.sources?.image ?? "unknown"} • manual changes are kept on refresh` },
 				{ value: "context", label: "Context window", suffix: ` • ${opts.contextWindow ?? "unset"}`, description: "Max context tokens for this model" },
 				{ value: "maxtokens", label: "Max output tokens", suffix: ` • ${opts.maxTokens ?? "unset"}`, description: "Max tokens this model may generate" },
 				{ value: "done", label: "Done", description: "Confirm this model and continue" },
 			]);
 			if (field === null || field === "done") break;
-			if (field === "reasoning") {
-				const v = await promptReasoning(ctx, opts.reasoning);
-				if (v !== null) opts.reasoning = v;
+			if (field === "thinking-levels") {
+				const choice = await promptSupportedThinkingLevels(ctx, resolved, opts.preferences);
+				if (!choice) continue;
+				const preferences = { ...opts.preferences };
+				if (choice.mode === "auto") delete preferences.thinkingLevelMap;
+				else preferences.thinkingLevelMap = choice.map;
+				const info = effectiveModelInfo(resolved, preferences);
+				const entry: any = { id, reasoning: info.reasoning ?? false };
+				applyModelCapabilities(entry, info, preferences);
+				opts.preferences = preferences;
+				opts.reasoning = supportedThinkingLevels(info)?.at(-1) ?? (info.reasoning ? "high" : "off");
+				opts.thinkingLevelMap = entry.thinkingLevelMap;
+			} else if (field === "name") {
+				const choice = await promptModelName(ctx, id, modelDisplayName(id, opts), resolved);
+				if (!choice) continue;
+				if (choice.mode === "auto") { delete opts.preferences!.name; opts.name = resolved.name; }
+				else { opts.preferences!.name = choice.value; opts.name = choice.value ?? undefined; }
 			} else if (field === "image") {
 				const v = await promptImage(ctx, opts.image);
-				if (v !== null) opts.image = v;
+				if (v !== null) { opts.image = v; opts.preferences!.image = v; }
 			} else if (field === "context") {
-				const v = await promptContextWindow(ctx, opts.contextWindow);
-				if (v !== null) opts.contextWindow = v > 0 ? v : undefined;
+				const choice = await promptContextChoice(ctx, opts.contextWindow, resolved);
+				if (choice?.mode === "auto") { delete opts.preferences!.contextWindow; opts.contextWindow = resolved.contextWindow; }
+				else if (choice) { opts.contextWindow = choice.value ?? undefined; opts.preferences!.contextWindow = choice.value; }
 			} else if (field === "maxtokens") {
 				const v = await promptMaxTokens(ctx, opts.maxTokens);
-				if (v !== null) opts.maxTokens = v > 0 ? v : undefined;
+				if (v !== null) { opts.maxTokens = v > 0 ? v : undefined; opts.preferences!.maxTokens = v > 0 ? v : null; }
 			}
 		}
 
@@ -235,7 +286,7 @@ export async function promptEndpoint(
 	}
 }
 
-export async function promptProviderId(ctx: CommandContext, normalizedEndpoint: string, suggestion?: string): Promise<string | null> {
+export async function promptProviderIdentity(ctx: CommandContext, normalizedEndpoint: string, suggestion?: string): Promise<ProviderIdentity | null> {
 	let existingIds = new Set<string>();
 	try {
 		existingIds = new Set(Object.keys(loadModelsConfig().providers ?? {}));
@@ -249,10 +300,11 @@ export async function promptProviderId(ctx: CommandContext, normalizedEndpoint: 
 	while (true) {
 		const providerNameInput = await ctx.ui.input(
 			suggestionTaken ? "Provider name (must be unique)" : `Provider name (blank = ${providerIdSuggestion})`,
-			"e.g. custom-example-com",
+			"e.g. AxonHub — spelling is preserved; the id is lowercase",
 		);
 		if (providerNameInput === undefined) return null;
-		const providerId = slugify(providerNameInput.trim() || providerIdSuggestion);
+		const name = providerNameInput.trim() || providerIdSuggestion;
+		const { id: providerId } = providerIdentity(name);
 		if (!providerId) {
 			ctx.ui.notify("Provider name is required.", "error");
 			continue;
@@ -271,9 +323,9 @@ export async function promptProviderId(ctx: CommandContext, normalizedEndpoint: 
 				ctx.ui.notify(`Provider "${resolved}" already exists. Choose a different name.`, "warning");
 				continue;
 			}
-			return resolved;
+			return providerIdentity(name, resolved);
 		}
-		return providerId;
+		return providerIdentity(name, providerId);
 	}
 }
 

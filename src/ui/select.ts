@@ -279,11 +279,13 @@ export async function pickMany(
 	ctx: CommandContext,
 	title: string,
 	items: ProbeItem[],
+	options?: { initialValues?: string[]; itemLabel?: string },
 ): Promise<string[] | null> {
 	return await ctx.ui.custom<string[] | null>((tui, theme, _kb, done) => {
 		let cursor = 0;
 		let query = "";
-		const selected = new Set<string>();
+		const available = new Set(items.map(item => item.value));
+		const selected = new Set<string>((options?.initialValues ?? []).filter(value => available.has(value)));
 		let cachedLines: string[] | undefined;
 		const maxVisible = 12;
 
@@ -346,7 +348,7 @@ export async function pickMany(
 				add();
 				add(theme.fg("dim", " Type to search • ↑↓ move (wraps) • space toggle • enter confirm • backspace delete • esc cancel"));
 				if (selected.size === 0) {
-					add(theme.fg("warning", " Select at least one model before confirming."));
+					add(theme.fg("warning", ` Select at least one ${options?.itemLabel ?? "model"} before confirming.`));
 				}
 				add(border);
 

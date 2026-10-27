@@ -1,33 +1,53 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { ModelCostInfo } from "model-probe";
+import type { ModelProbeInfo as ProbeModelInfo } from "model-probe";
 
 export type ProviderApi = "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generative-ai";
 export type ProviderStyle = "openai" | "openai-responses" | "anthropic" | "ollama" | "gemini";
 export type ApiKeyMode = "env" | "literal" | "shell" | "none";
-// pi's reasoning ceilings. "off" means no reasoning; the rest are the levels a
-// model is allowed to use. See pi-ai getSupportedThinkingLevels.
-export type ReasoningCeiling = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export const REASONING_LEVELS: ReasoningCeiling[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+export type ProviderIdentity = { id: string; name?: string };
+export type CapabilityField = "name" | "contextWindow" | "maxTokens" | "image" | "video" | "reasoning" | "thinkingLevelMap" | "alwaysThinking" | "cost";
+export type MetadataSource = "gateway" | "models.dev" | "local catalog" | "local rules";
+export type MetadataCandidate = { source: MetadataSource; label: string; info: ModelProbeInfo };
+export type ModelProbeInfo = ProbeModelInfo & {
+	name?: string;
+	thinkingLevelMap?: Record<string, string | null>;
+	sources?: Partial<Record<CapabilityField, string>>;
+	candidates?: MetadataCandidate[];
+};
+export type ModelPreferences = {
+	name?: string | null;
+	thinkingLevelMap?: Record<string, string | null>;
+	contextWindow?: number | null;
+	maxTokens?: number | null;
+	image?: boolean;
+};
+export type ModelState = { metadata?: ModelProbeInfo; preferences?: ModelPreferences };
+// Pi thinking levels used to describe model capabilities.
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const REASONING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 export const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 // Per-model knobs the wizard can write. apiKey lives at provider scope, not here.
 export type ModelOptions = {
-	reasoning: ReasoningCeiling;
+	name?: string;
+	reasoning: ThinkingLevel;
 	image: boolean;
 	contextWindow?: number;
 	maxTokens?: number;
 	// USD per 1M tokens, from the gateway or the models.dev catalog. Only real
 	// sources — never guessed.
 	cost?: ModelCostInfo;
-	// When set, written verbatim instead of deriving a map from the ceiling. Used
-	// when a probe learned the provider's exact thinking levels (effort options).
+	// Exact supported levels learned from metadata or declared manually.
 	thinkingLevelMap?: Record<string, string | null>;
+	metadata?: ModelProbeInfo;
+	preferences?: ModelPreferences;
 };
 
 // Model metadata types come from the model-probe package (probing logic was
 // extracted there); re-exported here so the rest of the extension has one
 // place to import from.
-export type { ModelCostInfo, ModelProbeInfo, ProbeResult } from "model-probe";
+export type { ModelCostInfo, ProbeResult } from "model-probe";
 
 export type ModelsConfig = {
 	providers?: Record<string, any>;

@@ -254,7 +254,7 @@ function parseYamlConfig(raw: string): any {
 	} catch {
 		throw new Error(
 			`${MODELS_JSON_PATH} is YAML, but the "yaml" package is not installed. ` +
-				'Run "npm install" in the better-custom folder, or reinstall the extension with "pi install", to edit YAML configs.',
+				'Run "npm install" in the pi-model-dock folder, or reinstall the extension with "pi install", to edit YAML configs.',
 		);
 	}
 }

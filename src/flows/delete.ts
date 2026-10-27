@@ -1,4 +1,5 @@
 import { loadModelsConfig, MODELS_JSON_PATH, removeProviderApiKey, saveModelsConfig } from "../config.ts";
+import { removeModelStates } from "../model-state.ts";
 import type { CommandContext, ModelsConfig } from "../types.ts";
 import { selectOne } from "../ui/select.ts";
 import { describeProvider, describeProviderInline, refreshModelRegistry } from "./shared.ts";
@@ -62,6 +63,7 @@ export async function deleteProviderFlow(ctx: CommandContext) {
 		// Drop the auth.json entry along with the provider (best-effort).
 		try {
 			removeProviderApiKey(choice);
+			removeModelStates(choice);
 		} catch (error) {
 			ctx.ui.notify(`Provider deleted, but its auth.json entry could not be removed: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		}

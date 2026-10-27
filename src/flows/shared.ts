@@ -1,19 +1,19 @@
 import {
-	describeProbeInfo,
 	fetchGatewayWideInfo as probeGatewayWideInfo,
-	fetchModelsDevInfoForBaseUrl,
-	fetchModelsDevModels,
-	fetchModelsDevProviders,
-	fetchPerModelInfo,
-	finalizeModelInfo,
-	normalizeModelIdCandidates,
+	fetchPerModelInfo as probePerModelInfo,
 	probeInfoSummary,
-	resolveModelInfo,
 } from "model-probe";
+import { describeCapabilities, resolveModelInfo, supportedThinkingLevels } from "../capabilities.ts";
+import { fetchPerModelInfo } from "../gateway-metadata.ts";
+import { fetchModelsDevInfoForBaseUrl, resolveModelMetadata } from "../model-catalog.ts";
+import { readModelState, removeModelStates, writeModelState } from "../model-state.ts";
+import { applyPreferences, effectiveModelInfo } from "../model-settings.ts";
+import { modelLabel } from "../model-name.ts";
 import { resolveApiKeyForProbe, serializeApiKey } from "../api-key.ts";
 import { BUILTIN_PROVIDER_IDS, loadModelsConfig, MODELS_JSON_PATH, removeProviderApiKey, saveModelsConfig, saveProviderApiKey } from "../config.ts";
-import { buildModelEntry, modelIdOf, modelOptionsFromProbe, readModelOptions } from "../model-entry.ts";
+import { buildModelEntry, modelIdOf, modelOptionsFromProbe } from "../model-entry.ts";
 import { AUTO_PROBE_PROFILE } from "../presets.ts";
+import { providerLabel } from "../provider-name.ts";
 import type { GatewayProbeProfile } from "../presets.ts";
 import type {
 	ApiKeyMode,
@@ -57,6 +57,8 @@ export async function mutateProvider(
 		return false;
 	}
 	await refreshModelRegistry(ctx);
+	try { removeModelStates(providerId, (provider.models ?? []).map(modelIdOf)); }
+	catch (error) { ctx.ui.notify(`Models saved, but old model preferences could not be cleaned up: ${error instanceof Error ? error.message : String(error)}`, "warning"); }
 	return true;
 }
 
@@ -93,7 +95,7 @@ export function describeProvider(providerId: string, provider: any): string {
 	const modelCount = Array.isArray(provider?.models) ? provider.models.length : 0;
 	const endpoint = typeof provider?.baseUrl === "string" ? provider.baseUrl : "(no baseUrl)";
 	const api = typeof provider?.api === "string" ? provider.api : "(no api)";
-	return `${providerId}\n${api} • ${modelCount} model${modelCount === 1 ? "" : "s"}\n${endpoint}`;
+	return `${providerLabel(providerId, provider)}\n${api} • ${modelCount} model${modelCount === 1 ? "" : "s"}\n${endpoint}`;
 }
 
 export function describeProviderInline(providerId: string, provider: any): { label: string; suffix: string; searchText: string } {
@@ -105,13 +107,13 @@ export function describeProviderInline(providerId: string, provider: any): { lab
 	const collision = BUILTIN_PROVIDER_IDS.has(providerId) ? " • ⚠ built-in id" : "";
 	const suffix = ` • ${api} • ${endpoint} • ${modelCount} model${modelCount === 1 ? "" : "s"}${collision}`;
 	return {
-		label: providerId,
+		label: providerLabel(providerId, provider),
 		suffix,
-		searchText: `${providerId} ${api} ${endpoint} ${modelCount}`,
+		searchText: `${providerLabel(providerId, provider)} ${api} ${endpoint} ${modelCount}`,
 	};
 }
 
-export function providerModelItems(provider: any): SelectItem[] {
+export function providerModelItems(provider: any, providerId?: string): SelectItem[] {
 	const models = Array.isArray(provider?.models) ? provider.models : [];
 	return models
 		.map((model: any) => {
@@ -120,11 +122,10 @@ export function providerModelItems(provider: any): SelectItem[] {
 
 			const details: string[] = [];
 			if (model && typeof model === "object") {
-				if (model.reasoning === true) {
-					const opts = readModelOptions(model);
-					details.push(`reasoning:${opts.reasoning}`);
-				}
-				if (Array.isArray(model.input) && model.input.includes("image")) details.push("image");
+				const state = providerId ? readModelState(providerId, id) : {};
+				const levels = supportedThinkingLevels(effectiveModelInfo(state.metadata ?? {}, state.preferences ?? {}));
+				details.push(`thinking: ${levels?.join("/") ?? "unknown"}`);
+				details.push(`image: ${state.metadata?.image === undefined && state.preferences?.image === undefined ? "unknown" : model.input?.includes("image") ? "on" : "off"}`);
 				if (typeof model.contextWindow === "number") details.push(`context ${model.contextWindow}`);
 				if (typeof model.maxTokens === "number") details.push(`max-out ${model.maxTokens}`);
 				if (model.cost && typeof model.cost === "object") details.push(`$${model.cost.input}/$${model.cost.output} per 1M`);
@@ -132,9 +133,9 @@ export function providerModelItems(provider: any): SelectItem[] {
 
 			return {
 				value: id,
-				label: id,
+				label: modelLabel(id, model),
 				suffix: details.length > 0 ? ` • ${details.join(" • ")}` : "",
-				searchText: `${id} ${details.join(" ")}`,
+				searchText: `${modelLabel(id, model)} ${details.join(" ")}`,
 			};
 		})
 		.filter((item: any): item is SelectItem => item !== null);
@@ -185,6 +186,7 @@ export async function removeProvider(ctx: CommandContext, providerId: string): P
 	// behind. Best-effort: a failing auth write must not undo the deletion.
 	try {
 		removeProviderApiKey(providerId);
+		removeModelStates(providerId);
 	} catch (error) {
 		ctx.ui.notify(`Provider deleted, but its auth.json entry could not be removed: ${error instanceof Error ? error.message : String(error)}`, "warning");
 	}
@@ -264,34 +266,38 @@ export async function addModelEntriesToProvider(
 		return;
 	}
 
-	// Added models default to reasoning on (xhigh ceiling); image, context and
-	// max-out come from the probe, then models.dev, then the local rules, then
-	// the api fallback, then model-probe's defaults (image off, reasoning on).
-	// Tune per model later via Edit provider → Edit a model.
-	const defaultOpts: ModelOptions = { reasoning: "xhigh", image: true };
+	const metadata = new Map<string, ModelProbeInfo>();
+	for (const id of fresh) {
+		const override = optionOverrides?.get(id);
+		metadata.set(id, override?.metadata ?? infoById?.get(id) ?? await resolveModelMetadata(ctx, id));
+	}
 	let detectedCount = 0;
 	const saved = await mutateProvider(ctx, providerId, (p) => {
 		const api = typeof p.api === "string" ? (p.api as ProviderApi) : undefined;
 		const models = Array.isArray(p.models) ? p.models : [];
 		for (const id of fresh) {
-			const mergedInfo = resolveModelInfo(id, infoById?.get(id), undefined, api);
+			const mergedInfo = resolveModelInfo(id, metadata.get(id), undefined, api);
 			if (probeInfoSummary(mergedInfo).length > 0) detectedCount++;
 			const override = optionOverrides?.get(id);
 			const opts = override
 				? {
 						...override,
+						name: override.name ?? mergedInfo.name,
 						contextWindow: override.contextWindow ?? mergedInfo.contextWindow,
 						maxTokens: override.maxTokens ?? mergedInfo.maxTokens,
 					}
-				: modelOptionsFromProbe(mergedInfo, defaultOpts);
-			models.push(buildModelEntry(id, opts));
+				: modelOptionsFromProbe(mergedInfo);
+			const entry = buildModelEntry(id, opts);
+			applyPreferences(entry, override?.preferences ?? {}, mergedInfo);
+			models.push(entry);
 		}
 		p.models = models;
 		return true;
 	});
 	if (saved) {
+		for (const id of fresh) rememberModelState(ctx, providerId, id, metadata.get(id)!, optionOverrides?.get(id)?.preferences);
 		const detail =
-			detectedCount > 0 ? ` — auto-detected metadata for ${detectedCount} model${detectedCount === 1 ? "" : "s"}` : "";
+			detectedCount > 0 ? ` — resolved metadata for ${detectedCount} model${detectedCount === 1 ? "" : "s"}` : "";
 		ctx.ui.notify(`Added ${fresh.length} model${fresh.length === 1 ? "" : "s"} to "${providerId}"${detail}.`, "info");
 	}
 }
@@ -312,9 +318,7 @@ export async function fetchGatewayWideInfo(
 	return probeGatewayWideInfo(baseUrl, { apiKey: resolveApiKeyForProbe(apiKey.mode, apiKey.value), profile });
 }
 
-// Build picker items for probed model ids, resolved through the models.dev
-// catalog, the local rules, and defaults. describeProbeInfo only renders values
-// that differ from the defaults, tagged [models.dev] / [local rules] by source.
+// Picker summaries include unknown fields and the source of each known value.
 export function probePickerItems(
 	ids: string[],
 	infoById: Map<string, ModelProbeInfo>,
@@ -323,8 +327,8 @@ export function probePickerItems(
 ): ProbeItem[] {
 	return ids.map((id) => ({
 		value: id,
-		label: id,
-		description: describeProbeInfo(resolveModelInfo(id, infoById.get(id), modelsDev, api)),
+		label: modelLabel(id, infoById.get(id) ?? modelsDev?.get(id)),
+		description: describeCapabilities(resolveModelInfo(id, infoById.get(id), modelsDev, api)),
 	}));
 }
 
@@ -337,8 +341,7 @@ export async function collectProbedModelInfo(
 	listInfo: Map<string, ModelProbeInfo>,
 	gatewayWide?: Map<string, ModelProbeInfo>,
 	modelsDev?: Map<string, ModelProbeInfo>,
-	// The provider's api flavor — enables model-probe's protocol-level
-	// fallback limits when nothing else knows them.
+	// The provider API helps rank installed catalog references.
 	api?: ProviderApi,
 ): Promise<Map<string, ModelProbeInfo>> {
 	ctx.ui.notify("Fetching model metadata (context, max-out, image/video, reasoning) ...", "info");
@@ -353,18 +356,21 @@ export async function collectProbedModelInfo(
 	const dev =
 		modelsDev ?? (profile.modelsDev && style !== "ollama" && style !== "gemini" ? await fetchModelsDevInfoForBaseUrl(baseUrl) : undefined);
 
-	// Per-model details for the picked ids. Skipped when a gateway-wide source
-	// already answered for everything (LiteLLM's /models/{id} has no metadata).
+	// A gateway-wide response can be partial. Fetch details for models whose
+	// image, reasoning, limits, or exact effort levels are still unknown.
 	let details = new Map<string, ModelProbeInfo>();
 	if (style === "ollama") {
-		details = await fetchPerModelInfo(baseUrl, ids, { apiKey: resolvedKey, ollama: true });
-	} else if (profile.perModelDetails && gw.size === 0) {
-		details = await fetchPerModelInfo(baseUrl, ids, { apiKey: resolvedKey });
+		details = await probePerModelInfo(baseUrl, ids, { apiKey: resolvedKey, ollama: true });
+	} else if (profile.perModelDetails) {
+		const missing = ids.filter(id => {
+			const info = { ...listInfo.get(id), ...gw.get(id) };
+			return info.image === undefined || info.reasoning === undefined || info.contextWindow === undefined || info.maxTokens === undefined || (info.reasoning !== false && !supportedThinkingLevels(info));
+		});
+		details = await fetchPerModelInfo(baseUrl, missing, resolvedKey);
 	}
 
-	// Merge (later maps win) and resolve: models.dev, then local rules, then
-	// the api fallback, then defaults.
-	return finalizeModelInfo(ids, [listInfo, gw, details], { modelsDev: dev, api });
+	// Merge actual gateway declarations, then fill missing fields from references.
+	return new Map(await Promise.all(ids.map(async id => [id, await resolveModelMetadata(ctx, id, { ...listInfo.get(id), ...gw.get(id), ...details.get(id) }, api, dev)] as const)));
 }
 
 // The ollama style leaves a compat object with BOTH flags false; every other
@@ -375,6 +381,7 @@ export function providerStyleOf(provider: unknown): ProviderStyle {
 	if ("api" in provider) {
 		const api = provider.api;
 		if (api === "anthropic-messages") return "anthropic";
+		if (api === "openai-responses") return "openai-responses";
 		if (api === "google-generative-ai") return "gemini";
 	}
 	if ("compat" in provider && provider.compat && typeof provider.compat === "object") {
@@ -388,73 +395,17 @@ export function providerStyleOf(provider: unknown): ProviderStyle {
 	return "openai";
 }
 
-export type ModelsDevOption = { providerId: string; key: string; info: ModelProbeInfo; rank: number };
+export { fetchModelsDevOptionsForModel, localModelCandidates } from "../model-catalog.ts";
+export type { ModelsDevOption } from "../model-catalog.ts";
 
-// Look up every models.dev catalog entry matching a model id, across all
-// providers, ignoring which endpoint the local provider points at. Relay
-// gateways decorate ids with prefixes (foo/openai/gpt-5.6-sol) and models.dev
-// keys official-provider models without the vendor prefix (anthropic's table
-// has "claude-sonnet-5") while aggregators key them with it, so every
-// normalization candidate is looked up as-is and with each leading segment
-// dropped. Options are ordered best-guess-first: the vendor named in the id
-// wins, then providers by how often the catalog cites "vendor/key" (the
-// maker's entry is cited far more than any host's copy), then catalog order.
-export async function fetchModelsDevOptionsForModel(modelId: string): Promise<ModelsDevOption[]> {
-	const providers = await fetchModelsDevProviders();
-	const tables = new Map<string, Map<string, ModelProbeInfo>>();
-	for (const provider of providers.values()) {
-		tables.set(provider.id, await fetchModelsDevModels(provider.id));
+export function rememberModelState(
+	ctx: CommandContext, providerId: string, modelId: string, metadata: ModelProbeInfo,
+	preferences?: import("../types.ts").ModelPreferences,
+) {
+	try {
+		const state = readModelState(providerId, modelId);
+		writeModelState(providerId, modelId, { metadata, preferences: preferences ?? state.preferences });
+	} catch (error) {
+		ctx.ui.notify(`Model saved, but metadata/preferences could not be saved: ${error instanceof Error ? error.message : String(error)}`, "warning");
 	}
-	// fetchModelsDevProviders only lists providers with an OpenAI-compatible
-	// baseUrl; native-API makers (anthropic, google, zai, ...) are absent. The
-	// rest of the catalog still cites them as "vendor/model", so every cited
-	// slug without a table yet gets one loaded through fetchModelsDevModels,
-	// which reads the full catalog directly.
-	const referenceCounts = new Map<string, number>();
-	for (const table of tables.values()) {
-		for (const id of table.keys()) {
-			const separator = id.indexOf("/");
-			if (separator <= 0) continue;
-			const vendor = id.slice(0, separator).toLowerCase();
-			referenceCounts.set(vendor, (referenceCounts.get(vendor) ?? 0) + 1);
-		}
-	}
-	for (const slug of referenceCounts.keys()) {
-		if (tables.has(slug)) continue;
-		const table = await fetchModelsDevModels(slug);
-		if (table.size > 0) tables.set(slug, table);
-	}
-
-	const seen = new Set<string>();
-	const options: ModelsDevOption[] = [];
-	const collect = (providerId: string, key: string, rank: number) => {
-		const dedupe = `${providerId}\0${JSON.stringify(key)}`;
-		if (seen.has(dedupe)) return;
-		seen.add(dedupe);
-		const info = tables.get(providerId)?.get(key);
-		if (info) options.push({ providerId, key, info, rank });
-	};
-
-	for (const candidate of normalizeModelIdCandidates(modelId)) {
-		const segments = candidate.split("/");
-		const keys = segments.length > 1 ? segments.slice(1).map((_, i) => segments.slice(i + 1).join("/")) : [candidate];
-		for (let i = 0; i < segments.length - 1; i++) {
-			const vendor = segments[i];
-			for (const key of keys) {
-				if (tables.has(vendor)) collect(vendor, key, 0);
-			}
-		}
-		for (const key of keys) {
-			const holders = [...tables.keys()]
-				.filter(providerId => tables.get(providerId)?.has(key))
-				.sort(
-					(a, b) =>
-						(referenceCounts.get(b.toLowerCase()) ?? 0) - (referenceCounts.get(a.toLowerCase()) ?? 0) ||
-						a.length - b.length,
-				);
-			for (const providerId of holders) collect(providerId, key, 1);
-		}
-		if (options.length > 0) break;
-	}
-	return options.sort((a, b) => a.rank - b.rank);
 }

@@ -1,7 +1,7 @@
 {
-  "name": "better-custom-provider",
+  "name": "pi-model-dock",
   "version": "1.6.0",
-  "description": "Pi and Oh My Pi extension for managing custom providers through an interactive wizard.",
+  "description": "pi-model-dock: an interactive custom provider manager for Pi and Oh My Pi.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -11,7 +11,7 @@
     "oh-my-pi",
     "omp",
     "omp-extension",
-    "better-custom",
+    "pi-model-dock",
     "custom-provider",
     "llm-provider",
     "ai-provider",
@@ -42,11 +42,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/real-wudaoshi/better-custom.git"
+    "url": "git+https://github.com/sheauhuu/pi-model-dock.git"
   },
-  "homepage": "https://github.com/real-wudaoshi/better-custom#readme",
+  "homepage": "https://github.com/sheauhuu/pi-model-dock#readme",
   "bugs": {
-    "url": "https://github.com/real-wudaoshi/better-custom/issues"
+    "url": "https://github.com/sheauhuu/pi-model-dock/issues"
   },
   "pi": {
     "extensions": [
@@ -54,6 +54,7 @@
     ]
   },
   "dependencies": {
+    "@opencode-ai/models": "^0.0.53",
     "model-probe": "^0.7.0",
     "yaml": "^2.9.0"
   },
@@ -71,6 +72,7 @@
   },
   "scripts": {
     "build": "echo 'No build step required'",
-    "check": "node --check index.ts && node --check src/types.ts && node --check src/config.ts && node --check src/url.ts && node --check src/api-key.ts && node --check src/model-entry.ts && node --check src/ui/select.ts && node --check src/ui/prompts.ts && node --check src/flows/shared.ts && node --check src/flows/add.ts && node --check src/flows/edit.ts && node --check src/flows/delete.ts"
+    "check": "node --check index.ts && node --check src/types.ts && node --check src/config.ts && node --check src/url.ts && node --check src/provider-name.ts && node --check src/api-key.ts && node --check src/model-entry.ts && node --check src/ui/select.ts && node --check src/ui/prompts.ts && node --check src/flows/shared.ts && node --check src/flows/add.ts && node --check src/flows/edit.ts && node --check src/flows/delete.ts && node --check src/capabilities.ts && node --check src/gateway-metadata.ts && node --check src/model-catalog.ts && node --check src/model-settings.ts && node --check src/model-state.ts && node --check src/model-name.ts",
+    "test": "node --experimental-vm-modules --test tests/*.test.mjs"
   }
 }
