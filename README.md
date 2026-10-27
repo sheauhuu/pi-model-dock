@@ -22,8 +22,8 @@ real-wudaoshi are retained unchanged in [LICENSE](LICENSE).
 The independent repository is configured as `origin`
 (`git@github.com:sheauhuu/pi-model-dock.git`); the source repository is
 `upstream` (`https://github.com/real-wudaoshi/better-custom.git`).
-The package has not been published to npm. Its version `1.6.0` is inherited
-from upstream and does not denote an independent npm release.
+Independent npm releases start at `0.1.0`; their version numbers are separate
+from the upstream project's releases.
 
 The initial import preserved upstream behavior. Independent development now
 includes provider display names, capability provenance, exact thinking levels,
@@ -80,13 +80,15 @@ and persistent usage limits, with `/provider` as its own command entry. See the
 ## Install
 
 ```bash
-pi install /path/to/pi-model-dock            # from this local checkout
+pi install npm:pi-model-dock
 ```
 
-After the independent repository is published, it can be installed with
-`pi install https://github.com/sheauhuu/pi-model-dock`. The intended npm
-package name is `pi-model-dock`; npm installation is not available from this
-local preparation.
+Alternatively, install from GitHub or a local checkout:
+
+```bash
+pi install git:github.com/sheauhuu/pi-model-dock
+pi install /path/to/pi-model-dock
+```
 
 Prefer `pi install` over copying the folder into `~/.pi/agent/extensions/`
 manually: `pi install` runs `npm install`, so the runtime dependencies

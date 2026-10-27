@@ -20,8 +20,7 @@ pi-model-dock 基于
 
 独立仓库配置为 `origin`(`git@github.com:sheauhuu/pi-model-dock.git`),
 原仓库配置为 `upstream`(`https://github.com/real-wudaoshi/better-custom.git`)。
-本项目尚未发布 npm 包。包版本 `1.6.0` 沿用上游,
-不代表已经发布独立的 npm 版本。
+独立 npm 版本从 `0.1.0` 开始,版本号与上游项目分别维护。
 
 初始导入保留上游行为;独立开发现已增加 provider 显示名称、能力来源、
 完整思考档位和持久化使用限制,独立入口为 `/provider`。原始架构、检查结果与暂缓的优化建议见
@@ -71,12 +70,15 @@ pi-model-dock 基于
 ## 安装
 
 ```bash
-pi install /path/to/pi-model-dock            # 从当前本地检出安装
+pi install npm:pi-model-dock
 ```
 
-独立仓库发布后,可使用
-`pi install https://github.com/sheauhuu/pi-model-dock` 安装。
-计划使用的 npm 包名为 `pi-model-dock`;本地准备阶段尚未发布该包。
+也可以从 GitHub 或本地检出安装:
+
+```bash
+pi install git:github.com/sheauhuu/pi-model-dock
+pi install /path/to/pi-model-dock
+```
 
 建议用 `pi install`,而不是手动把文件夹复制到 `~/.pi/agent/extensions/`:
 `pi install` 会执行 `npm install`,运行时依赖(`@opencode-ai/models`、`model-probe`、`yaml`)

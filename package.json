@@ -1,6 +1,6 @@
 {
   "name": "pi-model-dock",
-  "version": "1.6.0",
+  "version": "0.1.0",
   "description": "pi-model-dock: an interactive custom provider manager for Pi and Oh My Pi.",
   "type": "module",
   "keywords": [
